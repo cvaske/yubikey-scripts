@@ -2,20 +2,26 @@
 set -e
 set -u
 
-if [[ $# != 2 ]]; then
+if [[ $# != 2 ]] || [[ -z ${ENCRYPT_PASSPHRASE:+x} ]] ; then
     cat <<EOF
+Generates auth, sign, and encrypt keys in PIV slots 9a, 9c, and 9d
+on a Yubikey Neo or Yubikey 4
+
 Usage:
   init-yubikey.sh outdirectory /SUBJECT/LINE/HERE/
+REQUIRED environment variable:
+  ENCRYPT_PASSPHRASE   -- passphrase for protecting the encryption key
+
+Optional environment variables:
+  YUBI_PIN -- currently set PIN for the yubikey
+  YUBI_MGMT_KEY -- current admin/management key for the yubikey
 
 Example subject line:
 
-/C=US/ST=CA/L=Santa Cruz/O=SeaVaske/OU=Genomics/CN=Charles Vaske/emailAddress=charlie@example.com/
+/C=US/ST=CA/L=Anytown/O=Company/OU=Unit/CN=Jane Doe/emailAddress=j@example.com/
 
-WARNING: this stores a private key, and unless the environment
-variable ENCRYPT_PASSPHRASE is set, it will be written in clear text!
+WARNING: this stores a private key on your disk!
 
-This generates auth, sign, and encrypt keys in slots 9a, 9c, and 9d
-respectively.
 
 The following files are placed in the output directory:
 
@@ -44,7 +50,17 @@ fi
 
 O=$1
 SUBJECT=$2
-PIN='-P 123456'
+
+PIN=''
+if [[ ! -z ${YUBI_PIN:+x} ]]; then
+    echo 'Using PIN from $YUBI_PIN...' > /dev/stderr
+    PIN="-P $YUBI_PIN"
+fi
+
+if [[ ! -z ${YUBI_MGMT_KEY:+x} ]]; then
+    echo 'Using admin key from $YUBI_MGMT_KEY...' > /dev/stderr
+    PIN="$PIN --key=$YUBI_MGMT_KEY"
+fi
 
 umask 077
 
@@ -58,27 +74,39 @@ fi
 echo
 echo GENERATING authentication key
 yubico-piv-tool -a verify-pin $PIN -a generate -s 9a -o $O/auth.pubkey
-yubico-piv-tool -a verify-pin $PIN -a request-certificate -s 9a -o $O/auth.csr -i $O/auth.pubkey -S "$SUBJECT"
-yubico-piv-tool -a verify-pin $PIN -a selfsign-certificate -s 9a -o $O/auth.selfsign.crt -i $O/auth.pubkey -S "$SUBJECT"
-yubico-piv-tool -a verify-pin $PIN -a import-certificate -s 9a -i $O/auth.selfsign.crt
-ssh-keygen -D /Library/OpenSC/lib/opensc-pkcs11.so -e | head -1 > $O/auth.ssh.pub
+yubico-piv-tool -a verify-pin $PIN -a request-certificate \
+    -s 9a -o $O/auth.csr -i $O/auth.pubkey -S "$SUBJECT"
+yubico-piv-tool -a verify-pin $PIN -a selfsign-certificate \
+    -s 9a -o $O/auth.selfsign.crt -i $O/auth.pubkey -S "$SUBJECT"
+yubico-piv-tool -a verify-pin $PIN -a import-certificate \
+    -s 9a -i $O/auth.selfsign.crt
+ssh-keygen -D /Library/OpenSC/lib/opensc-pkcs11.so -e \
+    | head -1 \
+    > $O/auth.ssh.pub
 
 echo
 echo GENERATING signing key
 yubico-piv-tool -a verify-pin $PIN -a generate -s 9c -o $O/sign.pubkey
-yubico-piv-tool -a verify-pin $PIN -a request-certificate -s 9c -o $O/sign.csr -i $O/sign.pubkey -S "$SUBJECT"
-yubico-piv-tool -a verify-pin $PIN -a selfsign-certificate -s 9c -S "$SUBJECT" -i $O/sign.pubkey  -o $O/sign.selfsign.crt
-yubico-piv-tool -a verify-pin $PIN -a import-certificate -s 9c -i $O/sign.selfsign.crt
+yubico-piv-tool -a verify-pin $PIN -a request-certificate \
+    -s 9c -o $O/sign.csr -i $O/sign.pubkey -S "$SUBJECT"
+yubico-piv-tool -a verify-pin $PIN -a selfsign-certificate \
+    -s 9c -S "$SUBJECT" -i $O/sign.pubkey  -o $O/sign.selfsign.crt
+yubico-piv-tool -a verify-pin $PIN -a import-certificate -s \
+    9c -i $O/sign.selfsign.crt
 
 echo
 echo GENERATING encryption key
-openssl req -out $O/encrypt.csr -passout env:ENCRYPT_PASSPHRASE -keyout $O/encrypt.key \
+openssl req -out $O/encrypt.csr \
+    -passout env:ENCRYPT_PASSPHRASE -keyout $O/encrypt.key \
     -new -newkey rsa:2048 -sha256 -subj "$SUBJECT" -keyform pem \
     -pubkey
 
-yubico-piv-tool -a verify-pin $PIN -a import-key -s 9d -i $O/encrypt.key -p "$ENCRYPT_PASSPHRASE"
-yubico-piv-tool -a verify-pin $PIN -a selfsign-certificate -s 9d -S "$SUBJECT" -i $O/encrypt.csr -o $O/encrypt.selfsign.crt
-yubico-piv-tool -a verify-pin $PIN -a import-certificate -s 9d -i $O/encrypt.selfsign.crt
+yubico-piv-tool -a verify-pin $PIN -a import-key \
+    -s 9d -i $O/encrypt.key -p "$ENCRYPT_PASSPHRASE"
+yubico-piv-tool -a verify-pin $PIN -a selfsign-certificate \
+    -s 9d -S "$SUBJECT" -i $O/encrypt.csr -o $O/encrypt.selfsign.crt
+yubico-piv-tool -a verify-pin $PIN -a import-certificate \
+    -s 9d -i $O/encrypt.selfsign.crt
 
 ### To sign these with a CA that has the key on the yubikey, do:
 # brew install engine_pkcs11
